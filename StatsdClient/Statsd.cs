@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Diagnostics;
+using System.Text;
 using System.Threading.Tasks;
 
 namespace StatsdClient
@@ -10,6 +11,7 @@ namespace StatsdClient
     public class Statsd : IStatsd
     {
         private string _prefix;
+        private string _namePostfix;
         private IOutputChannel _outputChannel;
 
         /// <summary>
@@ -22,11 +24,11 @@ namespace StatsdClient
             if (String.IsNullOrEmpty(host))
             {
                 Trace.TraceWarning("Statsd client initialised with empty host address. Dropping back to NullOutputChannel.");
-                InitialiseInternal(() => new NullOutputChannel(), "", false);
+                InitialiseInternal(() => new NullOutputChannel(), "", "", false);
             }
             else
             {
-                InitialiseInternal(() => new UdpOutputChannel(host, port), "", false);
+                InitialiseInternal(() => new UdpOutputChannel(host, port), "", "", false);
             }
         }
 
@@ -55,6 +57,7 @@ namespace StatsdClient
                     : (IOutputChannel)new UdpOutputChannel(host, port);
             },
                 prefix,
+                "",
                 rethrowOnError);
         }
 
@@ -66,25 +69,40 @@ namespace StatsdClient
         /// <param name="prefix">A string prefix to prepend to every metric.</param>
         /// <param name="rethrowOnError">If True, rethrows any exceptions caught due to bad configuration.</param>
         /// <param name="outputChannel">Optional output channel (useful for mocking / testing).</param>
-        public Statsd(string host, int port, string prefix = null, bool rethrowOnError = false, IOutputChannel outputChannel = null)
+        /// <param name="postfix">A string to append to every metric.</param>
+        public Statsd(string host, int port, string prefix = null, bool rethrowOnError = false, IOutputChannel outputChannel = null, string postfix = null)
         {
             if (outputChannel == null)
             {
-                InitialiseInternal(() => new UdpOutputChannel(host, port), prefix, rethrowOnError);
+                InitialiseInternal(() => new UdpOutputChannel(host, port), prefix, postfix, rethrowOnError);
             }
             else
             {
-                InitialiseInternal(() => outputChannel, prefix, rethrowOnError);
+                InitialiseInternal(() => outputChannel, prefix, postfix, rethrowOnError);
             }
         }
 
-        private void InitialiseInternal(Func<IOutputChannel> createOutputChannel, string prefix, bool rethrowOnError)
+        private void InitialiseInternal(Func<IOutputChannel> createOutputChannel, string prefix, string postfix, bool rethrowOnError)
         {
-            _prefix = prefix;
+            _prefix = prefix;            
             if (_prefix != null && _prefix.EndsWith("."))
             {
                 _prefix = _prefix.Substring(0, _prefix.Length - 1);
             }
+            _namePostfix = postfix;            
+            if (_namePostfix != null)
+            {
+                if (_namePostfix.EndsWith("."))
+                {
+                    _namePostfix = postfix.Substring(0, postfix.Length - 1);
+                }
+                
+                if (!_namePostfix.StartsWith("."))
+                {
+                    _namePostfix = "." + _namePostfix;
+                }
+            }
+            
             try
             {
                 _outputChannel = createOutputChannel();
@@ -98,7 +116,7 @@ namespace StatsdClient
                 Trace.TraceError("Could not initialise the Statsd client: {0} - falling back to NullOutputChannel.", ex.Message);
                 _outputChannel = new NullOutputChannel();
             }
-        }
+        }             
 
         /// <summary>
         ///     Log a counter.
@@ -107,7 +125,13 @@ namespace StatsdClient
         /// <param name="count">The counter value (defaults to 1).</param>
         public async Task LogCountAsync(string name, long count = 1)
         {
-            await SendMetricAsync(MetricType.COUNT, name, _prefix, count);
+            if (name == null)
+                throw new ArgumentNullException("name cannot be null");
+            if (count < 0)
+                throw new ArgumentOutOfRangeException(
+                    "count must be greater than or equal to 0");
+
+            await SendMetricAsync(MetricType.COUNT, name, count);
         }
 
         /// <summary>
@@ -117,7 +141,9 @@ namespace StatsdClient
         /// <param name="milliseconds">The duration, in milliseconds, for this metric.</param>
         public async Task LogTimingAsync(string name, long milliseconds)
         {
-            await SendMetricAsync(MetricType.TIMING, name, _prefix, milliseconds);
+            if (milliseconds < 0)
+                throw new ArgumentOutOfRangeException("time cannot be negative");
+            await SendMetricAsync(MetricType.TIMING, name, milliseconds);
         }
 
         /// <summary>
@@ -127,9 +153,12 @@ namespace StatsdClient
         /// <param name="value">The value for this gauge</param>
         public async Task LogGaugeAsync(string name, long value)
         {
-            await SendMetricAsync(MetricType.GAUGE, name, _prefix, value);
-        }
+            if (value < 0)
+                throw new ArgumentOutOfRangeException("value cannot be negative");
 
+            await SendMetricAsync(MetricType.GAUGE, name, value);
+        }
+       
         /// <summary>
         ///     Log to a set
         /// </summary>
@@ -141,7 +170,7 @@ namespace StatsdClient
         /// </remarks>
         public async Task LogSetAsync(string name, long value)
         {
-            await SendMetricAsync(MetricType.SET, name, _prefix, value);
+            await SendMetricAsync(MetricType.SET, name, value);
         }
 
         /// <summary>
@@ -152,7 +181,7 @@ namespace StatsdClient
         /// <param name="epoch">(optional) The epoch timestamp. Leave this blank to have the server assign an epoch for you.</param>
         public async Task LogRawAsync(string name, long value, long? epoch = null)
         {
-            await SendMetricAsync(MetricType.RAW, name, String.Empty, value, epoch.HasValue ? epoch.ToString() : null);
+            await SendMetricAsync(MetricType.RAW, name, value, epoch.HasValue ? epoch.ToString() : null);
         }
 
         /// <summary>
@@ -163,7 +192,7 @@ namespace StatsdClient
         /// <param name="period">The time period, can be one of h,d,dow,w,m</param>
         public async Task LogCalendargramAsync(string name, string value, string period)
         {
-            await SendMetricAsync(MetricType.CALENDARGRAM, name, _prefix, value, period);
+            await SendMetricAsync(MetricType.CALENDARGRAM, name, value, period);
         }
 
         /// <summary>
@@ -174,26 +203,27 @@ namespace StatsdClient
         /// <param name="period">The time period, can be one of h,d,dow,w,m</param>
         public async Task LogCalendargramAsync(string name, long value, string period)
         {
-            await SendMetricAsync(MetricType.CALENDARGRAM, name, _prefix, value, period);
+            await SendMetricAsync(MetricType.CALENDARGRAM, name, value, period);
         }
 
-        private async Task SendMetricAsync(string metricType, string name, string prefix, long value, string postFix = null)
+        private async Task SendMetricAsync(string metricType, string name, long value, string postFix = null)
         {
             if (value < 0)
             {
                 Trace.TraceWarning("Metric value for {0} was less than zero: {1}. Not sending.", name, value);
                 return;
             }
-            await SendMetricAsync(metricType, name, prefix, value.ToString(), postFix);
+            await SendMetricAsync(metricType, name, value.ToString(), postFix);
         }
 
-        private async Task SendMetricAsync(string metricType, string name, string prefix, string value, string postFix = null)
+        private async Task SendMetricAsync(string metricType, string name, string value, string postFix = null)
         {
             if (String.IsNullOrEmpty(name))
             {
                 throw new ArgumentNullException("name");
             }
-            await _outputChannel.SendAsync(PrepareMetric(metricType, name, prefix, value, postFix));
+            var metric = PrepareMetric(metricType, name, _prefix, value, _namePostfix, postFix);
+            await _outputChannel.SendAsync(metric);
         }
 
         /// <summary>
@@ -205,12 +235,32 @@ namespace StatsdClient
         /// <param name="value"></param>
         /// <param name="postFix">A value to append to the end of the line.</param>
         /// <returns>The formatted metric</returns>
-        protected virtual string PrepareMetric(string metricType, string name, string prefix, string value, string postFix = null)
+        protected virtual string PrepareMetric(string metricType, 
+            string name, string prefix, string value, string namePostfix = null, string postFix = null)
         {
-            return (String.IsNullOrEmpty(prefix) ? name : (prefix + "." + name))
-                   + ":" + value
-                   + "|" + metricType
-                   + (postFix == null ? String.Empty : "|" + postFix);
+            StringBuilder builder = new StringBuilder();
+            if(!String.IsNullOrEmpty(prefix))
+            {
+                builder.Append(prefix);
+                builder.Append('.');
+            }
+            builder.Append(name);
+            if (!String.IsNullOrEmpty(namePostfix))
+            {
+                builder.Append(namePostfix);
+            }
+
+            builder.Append(':');
+            builder.Append(value);
+            builder.Append('|');
+            builder.Append(metricType);           
+
+            if (!String.IsNullOrEmpty(postFix))
+            {
+                builder.Append('|');
+                builder.Append(postFix);
+            }
+            return builder.ToString();
         }
     }
 }
